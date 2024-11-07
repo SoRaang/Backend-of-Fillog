@@ -2,13 +2,15 @@ const mongoose = require('mongoose');
 
 const guestSchema = new mongoose.Schema({
     writtenUser: {
-        isUser: Boolean,
+        isUser: {
+            type: Boolean,
+            required: true
+        },
         userID: String,
         userName: {
             type: String,
             required: true
         },
-        userImage: String,
         password: String
     },
     text: String,

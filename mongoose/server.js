@@ -1,31 +1,29 @@
-const express = require('express')
-const dotenv = require('dotenv');
-const bodyParser = require('body-parser');
-const mongoose = require('mongoose');
+const dotENV = require('dotenv');
+const express = require('express');
 const cors = require('cors');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
+const cookieParser = require('cookie-parser');
+const bodyParser = require('body-parser');
+const session = require('express-session');
+const JWT = require('jsonwebtoken');
+const bCrypt = require('bcrypt');
 const multer = require('multer');
-
-const { ObjectId } = mongoose.Types;
 
 // --- 여기서부터 데이터 모델 등록 ---
 
-const db = require('./model');
+const dataBase = require('./model');
 const User = require('./registerModel');
 const Users = require('./userModel');
 const Post = require('./postModel');
 const Reply = require('./replyModel');
 const Guestbook = require('./guestModel');
 const GuestbookReply = require('./guestReplyModel');
-const Follow = require('./followerModel');
 
-dotenv.config({path: '../.env'});
+// --- 데이터 모델 등록 끝 ---
+
+dotENV.config({path: '../.env'});
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
-
-// JWT 비밀키를 환경변수에서 가져오기
 const SECRET_KEY = process.env.JWT_SECRET_KEY || 'default_secret_key';
 
 app.use(cors({
@@ -35,69 +33,80 @@ app.use(cors({
     credentials: true
 }));
 
-// body-parser에 요청 본문 크기 제한 설정
-app.use(bodyParser.json({ limit: '10mb' })); // 10MB로 설정
+app.use(cookieParser());
+app.use(bodyParser.json({ limit: '10mb' })); // 요청 최대 크기 제한
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+app.use(session({
+    key: 'loginData',
+    secret: 'testSecret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        expires: 60 * 60 * 24
+    }
+}));
+
 app.use('/uploads', express.static('uploads'));
 
-
-db.main();
+dataBase.main();
 
 app.get('/', (req, res) => {
-    res.json({ message: 'Connected!' })
+    res.status(200).json({ message: 'Connected!' });
 });
 
-// 회원가입 라우트
-app.post('/register', upload.single('userImage'), async (req, res) => {
-    const { type, account, password, userName, commentedArticles } = req.body;
+
+
+// --- 사용자 관련 요청 ---
+
+app.post('/register', upload.single('userImage'), async (req, res) => { // 회원 가입
+    const { type, userAccount, userPassword, userName, likedArticles, commentedArticles, followers, followings } = req.body;
     const userImage = req.file;
 
     try {
-        if (!account || !password || !userName) {
-            return res.status(400).json({ message: '필수 정보를 입력해주세요.' });
+        if (!userAccount || !userPassword || !userName) {
+            return res.status(400).json({ message: '필수 정보가 입력되지 않았습니다.' });
         }
 
-        if (password.length < 8) {
+        if (userPassword.length < 8) {
             return res.status(400).json({ message: '비밀번호는 8자리 이상이어야 합니다.' });
         }
 
-        // 이메일 중복 확인
-        const email = await User.findOne({ account });
+        const isAccountExist = await User.findOne({ account: userAccount });
 
-        if (email) {
-            return res.status(400).json({ message: '이미 등록된 이메일입니다.' }); // 이메일 중복 에러 메시지
+        if (isAccountExist) {
+            return res.status(400).json({ message: '이미 등록된 계정입니다.' });
         }
 
-        // 비밀번호 암호화
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bCrypt.hash(userPassword, 10);
 
-        // 새로운 유저 생성
         const newUser = new User({
             type,
-            account,
-            password: hashedPassword, // 비밀번호 암호화
+            userAccount,
+            password: hashedPassword,
             userName,
             userImage: userImage ? userImage.path : null,
+            likedArticles,
             commentedArticles,
+            followers,
+            followings
         });
 
-        await newUser.save(); // 데이터베이스에 유저 저장
+        await newUser.save();
 
-        res.status(200).json({ message: '회원가입이 완료되었습니다!' });
+        res.status(200).json({ message: '회원 등록이 완료되었습니다.' });
     } catch(error) {
         if (error.name == 'MongoNetworkError') {
-            return res.status(500).json({ message: '데이터베이스 연결에 실패했습니다.' });
+            return res.status(500).json({ message: 'Database 연결에 실패했습니다.' });
         }
 
-        res.status(500).json({ message: '회원가입 중 서버 오류가 발생했습니다.' });
+        res.status(500).json({ message: '서버 오류가 발생했습니다.' });
     }
 });
 
-// 로그인 라우트
-app.post('/login', async (req, res) => {
-    try {
-        const { userAccount, userPassword } = req.body;
+app.post('/login', async (req, res) => { // 사용자 로그인
+    const { userAccount, userPassword } = req.body;
 
+    try {
         // 유저 찾기
         const user = await Users.findOne({ account: userAccount });
 
@@ -106,43 +115,41 @@ app.post('/login', async (req, res) => {
         }
 
         // 비밀번호 비교
-        const isMatch = await bcrypt.compare(userPassword, user.password);
+        const isMatch = await bCrypt.compare(userPassword, user.password);
 
         if (!isMatch) {
             return res.status(400).json({ message: '비밀번호가 일치하지 않습니다.' });
         }
 
-        // 비밀번호가 일치하면 JWT 토큰 발급
-        const token = jwt.sign(
-            { id: user._id, account: user.userAccount }, // 토큰에 포함할 사용자 정보 (Payload)
-            SECRET_KEY, // 비밀키를 사용해 서명
-            { expiresIn: '1h' } // 토큰 유효기간 (1시간)
+        const token = JWT.sign(
+            {
+                id: user._id,
+                account: user.userAccount,
+            }, SECRET_KEY, { expiresIn: '1h' }
         );
 
-        // 로그인 성공, 실패
-        res.json({ user, token });
-
+        res.status(200).json({ user, token });
     } catch(error) {
-        console.error(error);
         res.status(500).json({ message: '로그인 실패' });
     }
 });
 
-// 토큰 검증 미들웨어
-const tokenMiddleware = async (req, res, next) => {
+const tokenMiddleware = async (req, res, next) => { // JWT 검증을 위한 미들웨어
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (!token) return res.sendStatus(401); // 토큰이 없을 경우
+    if (!token) return res.sendStatus(401);
 
-    jwt.verify(token, SECRET_KEY, async (err, decoded) => {
-        if (err) return res.sendStatus(403); // 토큰이 유효하지 않을 경우
+    JWT.verify(token, SECRET_KEY, async (error, decoded) => {
+        if (error) return res.sendStatus(403);
 
         try{
-            // 토큰에 포함된 사용자 ID를 이용하여 DB에서 사용자 정보 조회
             const user = await User.findById(decoded.id);
-            if (!user) return res.sendStatus(404); // 사용자를 찾을 수 없을 경우
-            req.user = user; // 요청 객체에 사용자 정보 추가
+
+            if (!user) return res.sendStatus(404);
+
+            req.user = user;
+
             next();
         } catch(error) {
             res.status(500).json({ message: '서버 오류 발생' });
@@ -150,18 +157,111 @@ const tokenMiddleware = async (req, res, next) => {
     });
 };
 
- // 토큰을 이용해 사용자 정보 가져오기
-app.get('/profile', tokenMiddleware, async (req, res) => {
+app.get('/profile', tokenMiddleware, async (req, res) => { // 토큰 검증을 통해 사용자 프로파일 가져오기
     try {
-        res.json(req.user);
-    } catch (err) {
-        console.error(err);
+        res.status(200).json(req.user);
+    } catch(error) {
         res.status(500).json({ message: '사용자 정보 조회 실패' });
     }
 });
 
-// 글쓰기
-app.post('/post', async (req, res) => {
+app.get('/admin-info', async (req, res) => { // 블로그 관리자 정보 가져오기
+    try {
+        const admin = await Users.findOne({ type: 'admin' });
+
+        if (!admin) {
+            return res.status(404).json({ message: '관리자를 찾을 수 없습니다.' });
+        }
+
+        res.status(200).json({
+            adminID: admin._id,
+            adminName: admin.userName,
+            adminImage: admin.userImage,
+            followers: admin.followers,
+            blogInfo: admin.blogSettings
+        });
+    } catch(error) {
+        res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+    }
+});
+
+app.get('/my-page', async(req, res) => { // 사용자 마이 페이지
+    const { account } = req.body;
+
+    try{
+        const findUser = await Users.findOne( account );
+
+        if (!findUser) {
+            return res.status(404).json({ message: '사용자를 찾을 수 없습니다' });
+        }
+
+        res.status(200).json({
+            _id: findUser._id,
+            account: findUser.account,
+            userName: findUser.userName,
+            userImage: findUser.userImage,
+            commentedArticles: findUser.commentedArticles,
+        });
+    } catch (error) {
+        res.status(500).json({ message: '유저 찾기 실패' });
+    }
+});
+
+app.get('/users', async (req, res) => { // 전체 사용자 목록 가져오기
+    try {
+        const users = await Users.find();
+
+        res.status(200).json(users);
+    } catch (err) {
+        res.status(500).json({ message: 'failed bring users' })
+    }
+});
+
+app.get('/user-info/:id', async (req, res) => { // 개별 사용자 정보 가져오기
+    try {
+        const user = await Users.findById(req.params.id);
+
+        res.status(200).json(user);
+    } catch(error) {
+        res.status(500).json({ message: 'Failed bring user' });
+    }
+});
+
+app.post('/user-info/edit', upload.single('userImage'), async (req, res) => { // 사용자 정보 수정
+    const { _id, userName, account } = req.body;
+    const userImage = req.file ? req.file.path : null;
+
+    try{
+        const updatedUser = await Users.findOneAndUpdate(
+            { _id: _id },
+            { userName, userImage, account },
+            { new: true }
+        );
+
+        if (!updatedUser) {
+            return res.status(404).json({ message: '사용자를 찾을 수 없습니다' });
+        }
+
+        res.status(200).json({
+            _id: updatedUser._id,
+            account: updatedUser.account,
+            userName: updatedUser.userName,
+            userImage: updatedUser.userImage,
+        });
+    } catch(error) {
+        res.status(500).json({ message: '사용자 정보 수정 실패', error });
+    }
+});
+
+app.delete('/quit', async (req, res) => { // 회원 탈퇴
+
+});
+
+
+
+// --- 포스트 관련 요청 ---
+
+app.post('/post', async (req, res) => { // 포스트 작성
     const { title, category, movieID, text, images, author } = req.body;
 
     try {
@@ -184,19 +284,17 @@ app.post('/post', async (req, res) => {
     }
 });
 
-// 게시글 목록
-app.get('/posts', async (req, res) => {
+app.get('/posts', async (req, res) => { // 포스트 전체 목록 가져오기
     try {
         const posts = await Post.find();
 
-        res.json(posts.sort((a, b) => { return b.createdAt - a.createdAt }));
+        res.status(200).json(posts.sort((a, b) => { return b.createdAt - a.createdAt }));
     } catch(error) {
         res.status(500).json({ message: 'Failed bring posts' });
     }
 });
 
-// 게시글 상세
-app.get('/posts/:id', async(req, res) => {
+app.get('/posts/:id', async(req, res) => { // 개별 포스트 가져오기
     const { id } = req.params;
     try {
         const post = await Post.findOne({ _id: id });
@@ -204,14 +302,13 @@ app.get('/posts/:id', async(req, res) => {
             return res.status(404).json({ message: "포스트를 찾을 수 없음" });
         }
 
-        res.json(post);
+        res.status(200).json(post);
     } catch(error) {
         res.status(500).json({ message: 'failed to find', error: error.message });
     }
 })
 
-// 게시글 좋아요
-app.post('/posts/:postId/like', async (req, res) => {
+app.post('/posts/:postId/like', async (req, res) => { // 포스트 좋아요, 좋아요 취소
     const postId = req.params.postId;
     const { userId } = req.body
 
@@ -237,40 +334,38 @@ app.post('/posts/:postId/like', async (req, res) => {
             user.likedArticles.push(postId);
             await post.save();
             await user.save();
-            return res.json({message: '좋아요 추가 성공', post})
+            return res.status(200).json({message: '좋아요 추가 성공', post})
         } else {
 
             post.likes -= 1;
             user.likedArticles = user.likedArticles.filter(id => id !== postId);
             await post.save();
             await user.save();
-            return res.json({ message: '좋아요 취소 성공', likes: post.likes });
+            return res.status(200).json({ message: '좋아요 취소 성공', likes: post.likes });
         }
     } catch(error) {
-        console.error(error);
         res.status(500).json({message: '좋아요 중 오류 발생'})
     }
 });
 
-// 게시글 수정
-app.put('/posts/:id', async(req, res) => {
-  const { id } = req.params;
-  const { title, text, category, images } = req.body;
-  try {
-      const editPost = await Post.findByIdAndUpdate(
-          id,
-          { title, text, category, images },
-          { new: true }
+app.put('/posts/:id', async(req, res) => { // 포스트 수정
+    const { id } = req.params;
+    const { title, text, category, images } = req.body;
+
+    try {
+        const editPost = await Post.findByIdAndUpdate(
+            id,
+            { title, text, category, images },
+            { new: true }
         );
 
-        res.json({ message: 'Post edited' });
+        res.status(200).json({ message: 'Post edited' });
     } catch(error) {
         res.status(500).json({ message: 'Edit failed' });
     }
 });
 
-// 게시글 삭제
-app.delete('/posts/:id', async(req, res) => {
+app.delete('/posts/:id', async(req, res) => { // 포스트 삭제
     const { id } = req.params;
 
     try {
@@ -282,25 +377,9 @@ app.delete('/posts/:id', async(req, res) => {
     }
 });
 
-app.get('/replies/:id', async (req, res) => { // 댓글 가져오기
-    try {
-        const replies = await Reply.findById(req.params.id); // 포스트에서 아이디 가져오기
 
-        res.json(replies);
-    } catch(error) {
-        res.status(500).json({ message: 'An error occurred' });
-    }
-});
 
-app.get('/replies/post/:id', async (req, res) => { // 포스트에 해당되는 댓글 가져오기
-    try {
-        const replies = await Reply.find({ repliedArticle: req.params.id });
-
-        res.json(replies);
-    } catch(error) {
-        res.status(500).json({ message: 'An error occurred' });
-    }
-});
+// --- 댓글 관련 요청 ---
 
 app.post('/reply/:postID', async (req, res) => { // 댓글, 대댓글 작성
     const postID = req.params.postID;
@@ -337,7 +416,6 @@ app.post('/reply/:postID', async (req, res) => { // 댓글, 대댓글 작성
 
         const savedComment = await newComment.save();
 
-        console.log('저장된 댓글 :', savedComment);
         post.comments.push(newComment._id);
 
         // 사용자가 이 포스트에 대한 첫 댓글이라면 userModel의 commentedArticles에 postId 추가
@@ -358,6 +436,26 @@ app.post('/reply/:postID', async (req, res) => { // 댓글, 대댓글 작성
     } catch (error) {
         console.error('댓글 추가 중 오류:', error.message);
         res.status(500).json({ message: '댓글 추가 중 오류가 발생했습니다.' });
+    }
+});
+
+app.get('/replies/:id', async (req, res) => { // 댓글 가져오기
+    try {
+        const replies = await Reply.findById(req.params.id);
+
+        res.json(replies);
+    } catch(error) {
+        res.status(500).json({ message: 'An error occurred' });
+    }
+});
+
+app.get('/replies/post/:id', async (req, res) => { // 포스트에 해당되는 댓글 전체 가져오기
+    try {
+        const replies = await Reply.find({ repliedArticle: req.params.id });
+
+        res.json(replies);
+    } catch(error) {
+        res.status(500).json({ message: 'An error occurred' });
     }
 });
 
@@ -396,8 +494,35 @@ app.delete('/reply/:replyID', async (req, res) => { // 댓글 삭제
         await Reply.findByIdAndDelete(replyID);
 
         return res.status(200).json({ message: '댓글이 삭제되었습니다.', post });
-    } catch (error) {
+    } catch(error) {
         res.status(500).json({ message: '댓글 삭제 중 오류가 발생했습니다.' });
+    }
+});
+
+
+
+// --- 방명록 관련 요청 ---
+
+app.post('/guestbooks/write', async (req, res) => { // 방명록 작성
+    const { isUser, userID, userName, password, text } = req.body;
+
+    try {
+        const newGuestbook = new Guestbook({
+            writtenUser: {
+                isUser,
+                userID,
+                userName,
+                password
+            },
+            text,
+            replies: []
+        });
+
+        await newGuestbook.save();
+
+        res.status(200).json({ message: 'Guestbook Posted Successfully' });
+    } catch(error) {
+        res.status(500).json({ message: 'An error occurred' });
     }
 });
 
@@ -406,30 +531,6 @@ app.get('/guestbooks', async (req, res) => { // 방명록 가져오기
         const guestbookList = await Guestbook.find();
 
         res.json(guestbookList.sort((a, b) => { return b.createdAt - a.createdAt }));
-    } catch(error) {
-        res.status(500).json({ message: 'An error occurred' });
-    }
-});
-
-app.post('/guestbooks/write', async (req, res) => { // 방명록 작성
-    const { isUser, userID, userName, userImage, password, text } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    try {
-        const newGuestbook = new Guestbook({
-            writtenUser: {
-                isUser,
-                userID,
-                userName,
-                userImage,
-                hashedPassword,
-            },
-            text
-        });
-
-        await newGuestbook.save();
-
-        res.status(200).json({ message: 'Guestbook Posted Successfully' });
     } catch(error) {
         res.status(500).json({ message: 'An error occurred' });
     }
@@ -462,81 +563,16 @@ app.get('/guestbooks/replies/:id', async (req, res) => { // 방명록 글의 전
     try {
         const replies = await GuestbookReply.find({ targetGuestbook: req.params.id });
 
-        res.json(replies);
+        res.status(200).json(replies);
     } catch(error) {
         res.status(500).json({ message: 'An error occurred' });
     }
 });
 
-// 마이페이지
-app.get('/mypage', async(req,res) => {
-  const { account } = req.body;
 
-  try{
-    const findUser = await Users.findOne( account );
-    console.log('유저 찾기 성공: ', findUser)
-    // res.json(findUser)
-    if (!findUser) {
-      return res.status(404).json({ message: '유저를 찾을 수 없습니다' });
-    }
-    res.json({
-      _id: findUser._id,
-      account: findUser.account,
-      userName: findUser.userName,
-      userImage: findUser.userImage,
-      commentedArticles: findUser.commentedArticles,
-    })
-  } catch (error) {
-      console.error("Error details:", error);
-      res.status(500).json({ message: '유저 찾기 실패' });
-  }
-})
 
-// 내 정보 수정
-app.post('/mypage/edit', upload.single('userImage'), async(req,res)=>{
-  const {_id, userName, account} = req.body;
-  const userImage = req.file ? req.file.path : null;
-  try{
-    const updatedUser = await Users.findOneAndUpdate(
-      { _id: _id },
-      { userName, userImage, account },
-      { new: true });
+// --- 팔로우 / 언팔로우 관련 요청 ---
 
-    if (!updatedUser) {
-      return res.status(404).json({ message: '유저를 찾을 수 없습니다' });
-    }
-    res.json({
-      _id: updatedUser._id,
-      account: updatedUser.account,
-      userName: updatedUser.userName,
-      userImage: updatedUser.userImage,
-    })
-  }catch (error){
-    res.status(500).json({ message: '유저 정보 수정 실패', error });
-  }
-})
-
-app.get('/users', async (req, res) => { // 전체 사용자 목록 가져오기
-    try {
-        const users = await Users.find();
-
-        res.json(users);
-    } catch (err) {
-        res.status(500).json({ message: 'failed bring users' })
-    }
-});
-
-app.get('/user-info/:id', async (req, res) => { // 개별 사용자 정보 가져오기
-    try {
-        const user = await Users.findById(req.params.id);
-
-        res.json(user);
-    } catch(error) {
-        res.status(500).json({ message: 'Failed bring user' });
-    }
-})
-
-// 팔로우 기능
 app.post('/users/:userId/follow', async (req, res, next) => {
     const { userID, followerID } = req.body;
 
@@ -552,6 +588,7 @@ app.post('/users/:userId/follow', async (req, res, next) => {
             { $push: { users: { user: userID } } },
             { safe: true, upsert: true, new: true}
         );
+
         const userWithFollowers = await Users.findById(userID).select('followers');
         console.log('Updated followers:', userWithFollowers.followers);
 
@@ -561,7 +598,6 @@ app.post('/users/:userId/follow', async (req, res, next) => {
     }
 });
 
-// 언팔로우 기능
 app.post('/users/:userId/unfollow', async (req, res, next) => {
     const { userID, followerID } = req.body;
 
@@ -584,28 +620,9 @@ app.post('/users/:userId/unfollow', async (req, res, next) => {
     }
 });
 
-app.get('/admin-info', async (req, res) => {
-    try {
-        // type이 "admin"인 첫 번째 사용자를 찾습니다.
-        const admin = await Users.findOne({ type: 'admin' });
 
-        if (!admin) {
-            return res.status(404).json({ message: '관리자를 찾을 수 없습니다.' });
-        }
 
-        // 관리자 이름과 이미지 경로 반환
-        res.json({
-            adminID: admin._id,
-            adminName: admin.userName,
-            adminImage: admin.userImage,
-            followers: admin.followers,
-            blogInfo: admin.blogSettings
-        });
-    } catch (error) {
-        console.error('관리자 정보 가져오기 실패(서버):', error);
-        res.status(500).json({ message: '서버 오류가 발생했습니다.' });
-    }
-});
+// --- 서버 시작 ---
 
 const PORT = process.env.PORT || 3000;
 

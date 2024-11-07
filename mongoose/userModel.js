@@ -4,6 +4,7 @@ const userSchema = new mongoose.Schema({
     type: {
         type: String,
         required: true,
+        default: 'user'
     },
     account: {
         type: String,
@@ -20,14 +21,8 @@ const userSchema = new mongoose.Schema({
     userImage: { type: String },
     commentedArticles: [ String ],
     likedArticles: [ String ],
-    followers: [
-        {
-            follow: {
-                type: Number,
-                ref: 'Follower'
-            }
-        }
-    ],
+    followers: [ String ],
+    followings: [ String ],
     blogSettings: {
         blogName: String,
         favoriteGenres: [ Number ],
